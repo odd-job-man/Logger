@@ -259,8 +259,8 @@ void MAKE_BINARY_LOG(BYTE* pBuffer, DWORD dwBufferLen, DWORD dwAlign, CONST WCHA
 
 
 	// 줄수 * (주소 + (스페이스바 ~ 바이트값 * 줄당 바이트값 갯수) * 줄수 + 널문자)
-	dwNumOfWChar = dwLineNumber * (ADDRESS + ((BYTESTRING + SPACEBAR) * dwAlign + ENTER)) + 
-		ADDRESS + dwLastLineByteNum * (BYTESTRING + SPACEBAR) + NULL_TERMINATOR; // 마지막줄
+	dwNumOfWChar = dwLineNumber * (ADDRESS + ((BYTESTRING + SPACEBAR) * dwAlign + ENTER)) +
+		(dwLastLineByteNum > 0 ? 1 : 0) * (ADDRESS + dwLastLineByteNum * (BYTESTRING + SPACEBAR)) + NULL_TERMINATOR; // 마지막줄
 	pTempFileBuf = (WCHAR*)HeapAlloc(g_hHeapHandle, HEAP_GENERATE_EXCEPTIONS, dwNumOfWChar * sizeof(WCHAR));
 
 	dwBinaryBufCnt = 0;
@@ -280,6 +280,7 @@ void MAKE_BINARY_LOG(BYTE* pBuffer, DWORD dwBufferLen, DWORD dwAlign, CONST WCHA
 		pTempFileBuf[dwWrittenWcharNum] = L'\n';
 		++dwWrittenWcharNum;
 		++dwLineCounter;
+		pTempFileBuf[dwWrittenWcharNum] = L'\0';
 	}
 
 	if (dwLastLineByteNum == 0)
