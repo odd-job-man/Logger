@@ -2,12 +2,18 @@
 #include"Logger.h"
 #include <strsafe.h>
 #include "LOG_BUF_INFO.h"
+#include <process.h>
 
 
 
 DWORD g_dwLogCount = 0;
 LOG_LEVEL g_logLevel = (LOG_LEVEL)DEBUG;
 #define LOCAL_LOG_BUF_SIZE 3000
+#define ASYNC_LOG_ROW 1000000
+#define ASYNC_LOG_COL ((300) * (sizeof(WCHAR)))
+HANDLE g_hAsyncLogThreadEvent;
+ULONGLONG g_ullAsyncIdx;
+HANDLE g_hAsyncLogThread;
 
 HANDLE g_hHeapHandle;
 __declspec(thread) WCHAR* g_pszFolderPath;
@@ -15,6 +21,11 @@ __declspec(thread) LOG_BUF_INFO g_logBufInfo;
 
 SRWLOCK g_srwForFILEIO;
 SRWLOCK g_srwForLogLevel;
+
+WCHAR (*g_AsyncLogArr)[ASYNC_LOG_COL / sizeof(WCHAR)];
+DWORD g_dwStartIdx;
+
+BOOL g_bFirstWritten = FALSE;
 
 void GetParentDir(WCHAR* szTargetPath)
 {
@@ -368,6 +379,95 @@ LOGGERAPI void LOG_MEMORY_VIEW(CONST WCHAR* pszType, LOG_LEVEL LogLevel, CHAR OU
 	}
 }
 
+WCHAR TempArr[100 * (ASYNC_LOG_COL / 2)];
+
+unsigned __stdcall AsyncLogThreadProc(void* pParam)
+{
+	while (1)
+	{
+		DWORD dwState = WaitForSingleObject(g_hAsyncLogThreadEvent, 1000);
+		if (dwState == WAIT_OBJECT_0)
+			break;
+
+		if (InterlockedExchange((LONG*)&g_bFirstWritten, g_bFirstWritten) == FALSE)
+			continue;
+
+		ULONGLONG ullTemp = _InterlockedExchange(&g_ullAsyncIdx, g_ullAsyncIdx);
+		// dwStartIdx 부터 dwLastIdx 까지 딱 쓸거임 즉 dwStartIdx == dwLastIdx일때까지 쓰고 dwLastIdx에서 한번 더 쓴후 g_dwStartIdx = dwStartIdx 저장하면 끝
+		// 따라서 깨어낫을땐 g_dwStartIdx를 바로 저장하고 거기서부터 쓰기 시작하면 된다.
+		DWORD dwStartIdx = g_dwStartIdx;
+
+		// dwLastIdx 까지 현재 써져잇는것이다.
+		DWORD dwLastIdx = (ullTemp - 1) % ASYNC_LOG_ROW;
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+
+		WCHAR FilePath[MAX_PATH];
+		StringCchPrintf(FilePath, MAX_PATH, L"%s\\%04d%02d_ASYNC.txt", g_pszFolderPath, st.wYear, st.wMonth);
+
+		FILE* pFile;
+		_wfopen_s(&pFile, FilePath, L"a");
+
+		DWORD dwWritten;
+		WCHAR* logArr;
+		while (dwLastIdx != dwStartIdx)
+		{
+			logArr = g_AsyncLogArr[dwStartIdx];
+			// 혹시모르니 마지막자리에 nullTerminator String 넣기
+			logArr[(ASYNC_LOG_COL / sizeof(WCHAR)) - 1] = L'\0';
+			fputws(logArr, pFile);
+			dwStartIdx = (dwStartIdx + 1) % ASYNC_LOG_ROW;
+		}
+		// 마지막
+		logArr = g_AsyncLogArr[dwStartIdx];
+		logArr[(ASYNC_LOG_COL / 2) - 1] = L'\0';
+		fputws(logArr, pFile);
+		g_dwStartIdx = (dwLastIdx + 1) % ASYNC_LOG_ROW;
+		fclose(pFile);
+		InterlockedExchange((LONG*)&g_bFirstWritten, FALSE);
+	}
+	return 0;
+}
+LOGGERAPI void LOG_ASYNC_INIT()
+{
+	g_AsyncLogArr = (WCHAR(*)[ASYNC_LOG_COL / sizeof(WCHAR)])HeapAlloc(g_hHeapHandle, HEAP_GENERATE_EXCEPTIONS, ASYNC_LOG_ROW * ASYNC_LOG_COL * 2);
+	g_hAsyncLogThreadEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+	HANDLE hThread = (HANDLE)_beginthreadex(nullptr, 0, AsyncLogThreadProc, nullptr, 0, nullptr);
+}
+
+LOGGERAPI void CLEAR_LOG_ASYNC()
+{
+	HeapFree(g_hHeapHandle, 0, g_AsyncLogArr);
+	SetEvent(g_hAsyncLogThreadEvent);
+	WaitForSingleObject(g_hAsyncLogThread, INFINITE);
+}
+
+LOGGERAPI void LOG_ASYNC(CONST WCHAR* pszStringFormat, ...)
+{
+	DWORD dwIdx;
+	WCHAR* logArr;
+	HRESULT hResult;
+	va_list va;
+	SIZE_T len;
+
+	ULONGLONG ullAsyncLogCount = InterlockedIncrement((LONG*)&g_ullAsyncIdx);
+
+
+	// 현재 쓸 인덱스
+	dwIdx = (ullAsyncLogCount - 1) % ASYNC_LOG_ROW;
+	logArr = g_AsyncLogArr[dwIdx];
+
+	hResult = StringCchPrintf(logArr, ASYNC_LOG_COL / 2, L"[%09llu] Thread ID : %u ", ullAsyncLogCount, GetCurrentThreadId());
+	len = wcslen(logArr);
+
+	va_start(va, pszStringFormat);
+	hResult = StringCchVPrintf(logArr + len, (ASYNC_LOG_COL / 2) - len, pszStringFormat, va);
+	va_end(va);
+	len = wcslen(logArr);
+	logArr[len] = L'\n';
+	logArr[len + 1] = L'\0';
+	InterlockedExchange((LONG*)&g_bFirstWritten, TRUE);
+}
 
 LOGGERAPI void SET_LOG_LEVEL(LOG_LEVEL level)
 {
